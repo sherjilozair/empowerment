@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.autograd import Variable
+import random
 
 from torch.distributions import Categorical
 from mnist_counter_env import MnistEnv
@@ -21,28 +22,35 @@ class EmpowermentAgent(nn.Module):
     self.input_size = input_size
     self.n_actions = n_actions
 
-    self.forward_lstm = nn.LSTM(input_size, 200, 2, batch_first=True)
-    self.forward_policy = nn.Linear(200, n_actions)
-    self.forward_value = nn.Linear(200, 1)
+    self.embedding = nn.Linear(input_size, 200)
 
-    self.bidirectional_lstm = nn.LSTM(input_size, 200, 2, batch_first=True, bidirectional=True)
-    self.bidirectional_policy = nn.Linear(400, n_actions)
+    self.p_lstm = nn.LSTM(200, 200, 3, batch_first=True)
+    self.p_policy = nn.Linear(200, n_actions)
+    self.p_value = nn.Linear(200, 1)
 
-    self.zero_state = torch.zeros(2, 1, 200).cuda(), torch.zeros(2, 1, 200).cuda()
+    self.q_lstm = nn.LSTM(200 * 2, 200, 3, batch_first=True)
+    self.q_policy = nn.Linear(200, n_actions)
+
+    self.zero_state = torch.zeros(3, 1, 200).cuda(), torch.zeros(3, 1, 200).cuda()
 
   def forward(self, x):
-    h, _ = self.forward_lstm(x)
-    logits = self.forward_policy(h)
+    h, _ = self.p_lstm(x)
+    logits = self.p_policy(h)
     return F.log_softmax(logits)
 
   def get_action(self, observation):
+    sample = random.random()
+    if sample < 0.05:
+      return random.randint(0, 4)
     observation = process_observation(observation)
     observation = torch.flatten(observation, 0, 2)
     observation = torch.unsqueeze(torch.unsqueeze(observation, 0), 0)
     observation = observation.cuda()
-    hidden, self.state = self.forward_lstm(observation, self.state)
-    logits = self.forward_policy(hidden)
+    embedding = F.relu(self.embedding(observation))
+    hidden, self.state = self.p_lstm(embedding, self.state)
+    logits = self.p_policy(hidden)
     policy = Categorical(logits=torch.squeeze(logits))
+    self.entropies.append(policy.entropy().item())
     action = policy.sample().item()
     return action
 
@@ -50,11 +58,13 @@ class EmpowermentAgent(nn.Module):
     self.state = self.zero_state
 
   def get_loss(self, states, actions):
-    internal_state, _ = self.forward_lstm(states)
-    backward_internal_state, _ = self.bidirectional_lstm(states)
+    embedding = F.relu(self.embedding(states))
+    p_state, _ = self.p_lstm(embedding)
+    concat_embedding = torch.cat((embedding, torch.unsqueeze(embedding[:, -1, :], dim=1).repeat(1, 10, 1)), dim=2)
+    q_state, _ = self.q_lstm(concat_embedding)
 
-    p_logits = self.forward_policy(internal_state)
-    q_logits = self.bidirectional_policy(backward_internal_state)
+    p_logits = self.p_policy(p_state)
+    q_logits = self.q_policy(q_state)
 
     p_logprobs = F.log_softmax(p_logits, dim=2)
     q_logprobs = F.log_softmax(q_logits, dim=2)
@@ -68,7 +78,7 @@ class EmpowermentAgent(nn.Module):
     rewards = q_logprobs_selected - p_logprobs_selected
     returns = torch.flip(torch.cumsum(torch.flip(rewards, dims=(1,)), dim=1), dims=(1,))
 
-    values = torch.squeeze(self.forward_value(internal_state))
+    values = torch.squeeze(self.p_value(p_state))
     self.empowerment = torch.mean(returns[:, 0])
     advantage = returns.detach() - values
 
@@ -84,10 +94,11 @@ def main():
 
   agent = EmpowermentAgent(env.shape[0] * env.shape[1], env.action_space.n).cuda()
   optimizer = optim.Adam(agent.parameters(), lr=1e-4)
-  for i in range(10000):
+  for i in range(100000):
     states_batch = []
     actions_batch = []
     final_states = []
+    agent.entropies = []
     for j in range(128):
       states = []
       actions = []
@@ -123,12 +134,12 @@ def main():
     loss = agent.get_loss(states, actions)
     loss.backward()
     optimizer.step()
-
+    print('iter', i)
     for row in hist:
       print(row)
     print()
     print(agent.empowerment.item())
-
+    print('entropies', np.mean(agent.entropies))
     #print(loss.item())
 
     del states
