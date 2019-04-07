@@ -9,10 +9,12 @@ import random
 from torch.distributions import Categorical
 from mnist_counter_env import MnistEnv
 
+
+max_steps = 3
+
 def process_observation(observation):
   observation = torch.as_tensor(observation, dtype=torch.float32)
   observation /= 255.0
-  observation -= 0.5
   return observation
 
 class EmpowermentAgent(nn.Module):
@@ -60,37 +62,31 @@ class EmpowermentAgent(nn.Module):
   def get_loss(self, states, actions):
     embedding = F.relu(self.embedding(states))
     p_state, _ = self.p_lstm(embedding)
-    concat_embedding = torch.cat((embedding, torch.unsqueeze(embedding[:, -1, :], dim=1).repeat(1, 10, 1)), dim=2)
+    concat_embedding = torch.cat((embedding, torch.unsqueeze(embedding[:, -1, :], dim=1).repeat(1, max_steps, 1)), dim=2)
     q_state, _ = self.q_lstm(concat_embedding)
 
     p_logits = self.p_policy(p_state)
     q_logits = self.q_policy(q_state)
 
-    p_logprobs = F.log_softmax(p_logits, dim=2)
-    q_logprobs = F.log_softmax(q_logits, dim=2)
+    p_logprobs = - F.cross_entropy(p_logits.view(-1, 5), actions.view(-1), reduction='none').view(-1, max_steps)
+    q_logprobs = - F.cross_entropy(q_logits.view(-1, 5), actions.view(-1), reduction='none').view(-1, max_steps)
 
-    # p_logprobs [batch_size, seqlen, n_actions]
-
-    p_logprobs_selected = torch.squeeze(torch.gather(p_logprobs, dim=2, index=torch.unsqueeze(actions, 2)), 2)
-    q_logprobs_selected = torch.squeeze(torch.gather(q_logprobs, dim=2, index=torch.unsqueeze(actions, 2)), 2)
-
-
-    rewards = q_logprobs_selected - p_logprobs_selected
+    rewards = q_logprobs - p_logprobs
     returns = torch.flip(torch.cumsum(torch.flip(rewards, dims=(1,)), dim=1), dims=(1,))
 
     values = torch.squeeze(self.p_value(p_state))
     self.empowerment = torch.mean(returns[:, 0])
     advantage = returns.detach() - values
 
-    variational_loss = -torch.mean(q_logprobs_selected)
-    policy_loss = -torch.mean(advantage.detach() * p_logprobs_selected)
+    variational_loss = -torch.mean(q_logprobs)
+    policy_loss = -torch.mean(advantage.detach() * p_logprobs)
     value_loss = torch.mean(advantage * advantage)
 
-    return policy_loss + value_loss + variational_loss
+    return policy_loss, value_loss, variational_loss
 
 
 def main():
-  env = MnistEnv()
+  env = MnistEnv(max_steps=max_steps)
 
   agent = EmpowermentAgent(env.shape[0] * env.shape[1], env.action_space.n).cuda()
   optimizer = optim.Adam(agent.parameters(), lr=1e-4)
@@ -131,16 +127,24 @@ def main():
     states = torch.flatten(states, 2, 4)
 
     optimizer.zero_grad()
-    loss = agent.get_loss(states, actions)
+    policy_loss, value_loss, variational_loss = agent.get_loss(states, actions)
+    # if i % 3 == 0:
+    loss = policy_loss + value_loss + variational_loss
+    # else:
+    # loss = value_loss + variational_loss
+
     loss.backward()
     optimizer.step()
     print('iter', i)
     for row in hist:
       print(row)
     print()
-    print(agent.empowerment.item())
+    print('empowerment', agent.empowerment.item())
     print('entropies', np.mean(agent.entropies))
-    #print(loss.item())
+
+    print('policy loss', policy_loss.item())
+    print('value loss', value_loss.item())
+    print('variational loss', variational_loss.item())
 
     del states
     del actions
