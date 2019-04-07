@@ -5,12 +5,14 @@ import torch.nn.functional as F
 
 class Agent(nn.Module):
 
-  def __init__(self, encoder, recurrence, discriminators, labels):
+  def __init__(self, encoder, recurrence, discriminators, device):
     super(Agent, self).__init__()
     self.encoder = encoder
     self.recurrence = recurrence
     self.discriminators = discriminators
-    self.labels = labels
+    self.device = device
+
+    self.labels = {step: torch.arange(self.batch_size * (self.sequence_length - step)).to(device) for step in discriminators}
     self.optimizer = torch.optim.SparseAdam(self.parameters(), lr=2e-4)
 
   def act(self, observation):
@@ -21,10 +23,14 @@ class Agent(nn.Module):
     pass
 
   def train(minibatch):
-    latents = self.encoder(minibatch['observations'])
-    contexts = self.recurrence(latents)
+    observations = minibatch['observations']
     actions = minibatch['actions']
+
+    latents = self.encoder(observations)
+    contexts = self.recurrence(latents)
+
     batch_size, sequence_length, latent_size = latents.size()
+
     all_costs = {}
     all_accuracies = {}
     for skip, discriminator in discriminators.items():
@@ -36,16 +42,14 @@ class Agent(nn.Module):
       logits = torch.matmul(flat_predics, flat_targets.t())
       skip_costs = F.cross_entropy(logits, self.labels[skip]).view(batch_size, n_predictions)
       all_costs[skip] = skip_costs
+
+    # costs [batch_size, sequence_length]
     costs = sum(F.pad(skip_costs, (0, skip)) for skip_costs in all_costs.values())
-    # [batch_size, sequence_length]
+
     loss = torch.mean(costs)
     self.optimizer.zero_grad()
     loss.backward()
     self.optimizer.step()
-
-
-
-
 
 
 
