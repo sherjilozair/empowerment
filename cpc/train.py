@@ -19,5 +19,6 @@ def main():
   device = torch.device('cuda') if args.cuda else torch.device('cpu')
   agent = Agent(encoder, recurrence, discriminators, device)
 
+  agent.train(env)
 
 

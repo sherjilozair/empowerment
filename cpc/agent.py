@@ -22,7 +22,7 @@ class Agent(nn.Module):
   def reset(self):
     pass
 
-  def train(minibatch):
+  def update(self, minibatch):
     observations = minibatch['observations']
     actions = minibatch['actions']
 
@@ -51,7 +51,8 @@ class Agent(nn.Module):
     loss.backward()
     self.optimizer.step()
 
-
+  def train(self, env, args):
+    pass
 
 
 
