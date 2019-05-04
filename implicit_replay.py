@@ -9,13 +9,25 @@ import random
 from torch.distributions import Categorical
 from mnist_counter_env import MnistEnv
 
-
 max_steps = 10
+
+class ReplayBuffer(object):
+  def __init__(self, capacity=10000, episode_len=10, image_size=(28, 28*2, 1)):
+    self.states = np.zeros((capacity, episode_len) + image_size)
+    self.actions = np.zeros((capacity, episode_len))
+    self.index = 0
+
+  def add(self, states, actions):
+    self.states[self.index] = states
+    self.actions[self.index] = actions
+    self.index += 1
 
 def process_observation(observation):
   observation = torch.as_tensor(observation, dtype=torch.float32)
   observation /= 255.0
   return observation
+
+replay_buffer = ReplayBuffer()
 
 class EmpowermentAgent(nn.Module):
   def __init__(self, input_size, n_actions):
@@ -114,8 +126,12 @@ def main():
         state = next_state
       final_states.append(info['state'].tolist())
       # print(infos)
-      states_batch.append(np.array(states))
-      actions_batch.append(np.array(actions))
+      episode_states = np.array(states)
+      episode_actions = np.array(actions)
+      replay_buffer.add(episode_states, episode_actions)
+
+      states_batch.append(episode_states)
+      actions_batch.append(episode_actions)
     hist = [[0]*10 for i in range(10)]
     for state in final_states:
       hist[state[0]][state[1]] += 1
