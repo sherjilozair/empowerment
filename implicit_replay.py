@@ -13,14 +13,23 @@ max_steps = 10
 
 class ReplayBuffer(object):
   def __init__(self, capacity=10000, episode_len=10, image_size=(28, 28*2, 1)):
-    self.states = np.zeros((capacity, episode_len) + image_size)
-    self.actions = np.zeros((capacity, episode_len))
+    self.capacity = capacity
+    self.episode_len = episode_len
+    self.image_size = image_size
+
+    self.states = np.zeros((capacity, episode_len) + image_size, dtype=np.float32)
+    self.actions = np.zeros((capacity, episode_len), dtype=np.int64)
     self.index = 0
 
   def add(self, states, actions):
     self.states[self.index] = states
     self.actions[self.index] = actions
     self.index += 1
+    self.index = self.index % self.capacity
+
+  def sample(self, batch_size):
+    idx = np.random.choice(self.capacity, size=batch_size)
+    return self.states[idx], self.actions[idx]
 
 def process_observation(observation):
   observation = torch.as_tensor(observation, dtype=torch.float32)
@@ -102,41 +111,48 @@ def main():
 
   agent = EmpowermentAgent(env.shape[0] * env.shape[1], env.action_space.n).cuda()
   optimizer = optim.Adam(agent.parameters(), lr=1e-4)
-  for i in range(100000):
+  for i in range(1000 * 1000):
     states_batch = []
     actions_batch = []
     final_states = []
     agent.entropies = []
-    for j in range(128):
-      states = []
-      actions = []
-      infos = []
-      state = env.reset_to_mid()
-      agent.reset_episode()
-      done = False
-      k = 0
-      while not done:
-        states.append(state)
-        k += 1
-        # print(i, j, k)
-        action = agent.get_action(state)
-        actions.append(action)
-        next_state, reward, done, info = env.step(action)
-        infos.append(info['state'].tolist())
-        state = next_state
-      final_states.append(info['state'].tolist())
-      # print(infos)
-      episode_states = np.array(states)
-      episode_actions = np.array(actions)
-      replay_buffer.add(episode_states, episode_actions)
+    states = []
+    actions = []
+    infos = []
+    state = env.reset_to_mid()
+    agent.reset_episode()
+    done = False
+    k = 0
+    while not done:
+      states.append(state)
+      k += 1
+      # print(i, j, k)
+      action = agent.get_action(state)
+      actions.append(action)
+      next_state, reward, done, info = env.step(action)
+      infos.append(info['state'].tolist())
+      state = next_state
+    final_states.append(info['state'].tolist())
+    # print(infos)
+    episode_states = np.array(states)
+    episode_actions = np.array(actions)
+    replay_buffer.add(episode_states, episode_actions)
 
-      states_batch.append(episode_states)
-      actions_batch.append(episode_actions)
-    hist = [[0]*10 for i in range(10)]
+    if i % 100 == 0 and i != 0:
+      print('iter', i)
+      for row in hist:
+        print(row)
+      print()
+    if i % 100 == 0:
+      hist = [[0]*10 for i in range(10)]
     for state in final_states:
       hist[state[0]][state[1]] += 1
-    states = np.array(states_batch)
-    actions = np.array(actions_batch)
+    if i < 10000:
+      continue
+    if i == 10000:
+      print("Replay buffer filled")
+
+    states, actions = replay_buffer.sample(128)
     states = process_observation(states)
     states = torch.as_tensor(states).cuda()
     actions = torch.as_tensor(actions).cuda()
@@ -144,23 +160,21 @@ def main():
 
     optimizer.zero_grad()
     policy_loss, value_loss, variational_loss = agent.get_loss(states, actions)
-    # if i % 3 == 0:
-    loss = policy_loss + value_loss + variational_loss
-    # else:
-    # loss = value_loss + variational_loss
+    if i % 100 == 0:
+      loss = policy_loss + value_loss + variational_loss
+    else:
+      loss = value_loss + variational_loss
 
     loss.backward()
     optimizer.step()
-    print('iter', i)
-    for row in hist:
-      print(row)
-    print()
-    print('empowerment', agent.empowerment.item())
-    print('entropies', np.mean(agent.entropies))
 
-    print('policy loss', policy_loss.item())
-    print('value loss', value_loss.item())
-    print('variational loss', variational_loss.item())
+    if i % 100 == 0 and i != 0:
+      print('empowerment', agent.empowerment.item())
+      print('entropies', np.mean(agent.entropies))
+
+      print('policy loss', policy_loss.item())
+      print('value loss', value_loss.item())
+      print('variational loss', variational_loss.item())
 
     del states
     del actions
